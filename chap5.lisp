@@ -834,7 +834,7 @@
 
 (defparameter *num-players* 2)
 (defparameter *max-dice* 3)
-(defparameter *board-size* 3)
+(defparameter *board-size* 4)
 (defparameter *board-hexnum* (* *board-size* *board-size*))
 
 (defun board-array (lst)
@@ -857,6 +857,15 @@
 			for hex = (aref board (+ x (* *board-size* y)))
 			do (format t "~a-~a " (player-letter (first hex))
 				   (second hex))))))
+
+(defun game-tree (board player spare-dice first-move)
+  (list player
+	board
+	(add-passing-move board
+			  player
+			  spare-dice
+			  first-move
+			  (attacking-moves board player spare-dice))))
 
 (defun add-passing-move (board player spare-dice first-move moves)
   (if first-move
@@ -940,6 +949,18 @@
     (if (> (length w) 1)
 	(format t "The game is a tie between ~a" (mapcar #'player-letter w))
 	(format t "The winner is ~a" (player-letter (car w))))))
+
+(defun rate-position (tree player)
+  (let ((moves (caddr tree)))
+    (if moves
+	(apply (if (eq (car tree) player)
+		   #'max
+		   #'min)
+	       (get-ratings tree player))
+	(let ((w (winners (cadr tree))))
+	  (if (member player w)
+	      (/ 1 (length w))
+	      0)))))
 
 (defun get-ratings (tree player)
   (mapcar (lambda (move)
@@ -1145,4 +1166,244 @@
 			netherworlds- you lose! the end.))
 	(t '(the wizard awakens from his slumber and greets you warmly.
 	     he hands you the magic low-carb donut- you win! the end.))))
+
+;; chap18
+
+(defmacro lazy (&body body)
+  (let ((forced (gensym))
+	(value (gensym)))
+    `(let ((,forced nil)
+	   (,value nil))
+       (lambda ()
+	 (unless ,forced
+	   (setf ,value (progn ,@body))
+	   (setf ,forced t))
+	 ,value))))
+
+(defun force (lazy-value)
+  (funcall lazy-value))
+
+(defmacro lazy-cons (a d)
+  `(lazy (cons ,a ,d)))
+
+(defun lazy-car (x)
+  (car (force x)))
+
+(defun lazy-cdr (x)
+  (cdr (force x)))
+
+(defparameter *integers*
+  (labels ((f (n)
+	     (lazy-cons n (f (1+ n)))))
+    (f 1)))
+
+(defun lazy-nil ()
+  (lazy nil))
+
+(defun lazy-null (x)
+  (not (force x)))
+
+(defun make-lazy (lst)
+  (lazy (when lst
+	  (cons (car lst) (make-lazy (cdr lst))))))
+
+(defun take (n lst)
+  (unless (or (zerop n) (lazy-null lst))
+    (cons (lazy-car lst) (take (1- n) (lazy-cdr lst)))))
+
+(defun take-all (lst)
+  (unless (lazy-null lst)
+    (cons (lazy-car lst) (take-all (lazy-cdr lst)))))
+
+(defun lazy-mapcar (fun lst)
+  (lazy (unless (lazy-null lst)
+	  (cons (funcall fun (lazy-car lst))
+		(lazy-mapcar fun (lazy-cdr lst))))))
+
+(defun lazy-mapcan (fun lst)
+  (labels ((f (lst-cur)
+	     (if (lazy-null lst-cur)
+		 (force (lazy-mapcan fun (lazy-cdr lst)))
+		 (cons (lazy-car lst-cur) (lazy (f (lazy-cdr lst-cur)))))))
+    (lazy (unless (lazy-null lst)
+	    (f (funcall fun (lazy-car lst)))))))
+
+(defun lazy-find-if (fun lst)
+  (unless (lazy-null lst)
+    (let ((x (lazy-car lst)))
+      (if (funcall fun x)
+	  x
+	  (lazy-find-if fun (lazy-cdr lst))))))
+
+(defun lazy-nth (n lst)
+  (if (zerop n)
+      (lazy-car lst)
+      (lazy-nth (1- n) (lazy-cdr lst))))
+
+(defun add-passing-move (board player spare-dice first-move moves)
+  (if first-move
+      moves
+      (lazy-cons (list nil
+		       (game-tree (add-new-dice board player
+						(1- spare-dice))
+				  (mod (1+ player) *num-players*)
+				  0
+				  t))
+		 moves)))
+
+(defun attacking-moves (board cur-player spare-dice)
+  (labels ((player (pos)
+	     (car (aref board pos)))
+	   (dice (pos)
+	     (cadr (aref board pos))))
+    (lazy-mapcan
+     (lambda (src)
+       (if (eq (player src) cur-player)
+	   (lazy-mapcan
+	    (lambda (dst)
+	      (if (and (not (eq (player dst)
+				cur-player))
+		       (> (dice src) (dice dst)))
+		  (make-lazy
+		   (list (list (list src dst)
+			       (game-tree (board-attack board
+							cur-player
+							src
+							dst
+							(dice src))
+					  cur-player
+					  (+ spare-dice (dice dst))
+					  nil))))
+		  (lazy-nil)))
+	    (make-lazy (neighbors src)))
+	   (lazy-nil)))
+     (make-lazy (loop for n below *board-hexnum*
+		      collect n)))))
+
+(defun handle-human (tree)
+  (fresh-line)
+  (princ "choose your move:")
+  (let ((moves (caddr tree)))
+    (labels ((print-moves (moves n)
+	       (unless (lazy-null moves)
+		 (let* ((move (lazy-car moves))
+			(action (car move)))
+		   (fresh-line)
+		   (format t "~a. " n)
+		   (if action
+		       (format t "~a -> ~a" (car action) (cadr action))
+		       (princ "end turn")))
+		 (print-moves (lazy-cdr moves) (1+ n)))))
+      (print-moves moves 1))
+    (fresh-line)
+    (cadr (lazy-nth (1- (read)) moves))))
+
+(defun play-vs-human (tree)
+  (print-info tree)
+  (if (not (lazy-null (caddr tree)))
+      (play-vs-human (handle-human tree))
+      (announce-winner (cadr tree))))
+
+(defun limit-tree-depth (tree depth)
+  (list (car tree)
+	(cadr tree)
+	(if (zerop depth)
+	    (lazy-nil)
+	    (lazy-mapcar (lambda (move)
+			   (list (car move)
+				 (limit-tree-depth (cadr move) (1- depth))))
+			 (caddr tree)))))
+
+(defparameter *ai-level* 4)
+
+(defun handle-computer (tree)
+  (let ((ratings (get-ratings (limit-tree-depth tree *ai-level*)
+			      (car tree))))
+    (cadr (lazy-nth (position (apply #'max ratings) ratings)
+		    (caddr tree)))))
+
+(defun play-vs-computer (tree)
+  (print-info tree)
+  (cond ((lazy-null (caddr tree)) (announce-winner (cadr tree)))
+	((zerop (car tree)) (play-vs-computer (handle-human tree)))
+	(t (play-vs-computer (handle-computer tree)))))
+
+(defun score-board (board player)
+  (loop for hex across board
+	for pos from 0
+	sum (if (eq (car hex) player)
+		(if (threatened pos board)
+		    1
+		    2)
+		-1)))
+
+(defun threatened (pos board)
+  (let* ((hex (aref board pos))
+	 (player (car hex))
+	 (dice (cadr hex)))
+    (loop for n in (neighbors pos)
+	  do (let* ((nhex (aref board n))
+		    (nplayer (car nhex))
+		    (ndice (cadr nhex)))
+	       (when (and (not (eq player nplayer)) (> ndice dice))
+		 (return t))))))
+
+(defun get-ratings (tree player)
+  (take-all (lazy-mapcar (lambda (move)
+			   (rate-position (cadr move) player))
+			 (caddr tree))))
+
+(defun rate-position (tree player)
+  (let ((moves (caddr tree)))
+    (if (not (lazy-null moves))
+	(apply (if (eq (car tree) player)
+		   #'max
+		   #'min)
+	       (get-ratings tree player))
+	(score-board (cadr tree) player))))
+
+(defun ab-get-ratings-max (tree player upper-limit lower-limit)
+  (labels ((f (moves lower-limit)
+	     (unless (lazy-null moves)
+	       (let ((x (ab-rate-position (cadr (lazy-car moves))
+					  player
+					  upper-limit
+					  lower-limit)))
+		 (if (>= x upper-limit)
+		     (list x)
+		     (cons x (f (lazy-cdr moves) (max x lower-limit))))))))
+    (f (caddr tree) lower-limit)))
+
+(defun ab-get-ratings-min (tree player upper-limit lower-limit)
+  (labels ((f (moves upper-limit)
+	     (unless (lazy-null moves)
+	       (let ((x (ab-rate-position (cadr (lazy-car moves))
+					  player
+					  upper-limit
+					  lower-limit)))
+		 (if (<= x lower-limit)
+		     (list x)
+		     (cons x (f (lazy-cdr moves) (min x upper-limit))))))))
+    (f (caddr tree) upper-limit)))
+
+(defun ab-rate-position (tree player upper-limit lower-limit)
+  (let ((moves (caddr tree)))
+    (if (not (lazy-null moves))
+	(if (eq (car tree) player)
+	    (apply #'max (ab-get-ratings-max tree
+					     player
+					     upper-limit
+					     lower-limit))
+	    (apply #'min (ab-get-ratings-min tree
+					     player
+					     upper-limit
+					     lower-limit)))
+	(score-board (cadr tree) player))))
+
+(defun handle-computer (tree)
+  (let ((ratings (ab-get-ratings-max (limit-tree-depth tree *ai-level*)
+				     (car tree)
+				     most-positive-fixnum
+				     most-negative-fixnum)))
+    (cadr (lazy-nth (position (apply #'max ratings) ratings) (caddr tree)))))
 
